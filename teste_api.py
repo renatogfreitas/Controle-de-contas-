@@ -282,6 +282,8 @@ class Api:
                     if isinstance(js.get(k), str):
                         detail = sanitize_text(js[k])[:120]
                         break
+            if not detail and isinstance(js, dict) and isinstance(js.get("messages"), list):
+                detail = sanitize_text("; ".join(str(m) for m in js["messages"]))[:120]
             detail = detail or "(sem detalhe)"
         return {"status": status, "ms": ms, "json": js, "error": err,
                 "detail": detail, "retry_after": retry_after}
