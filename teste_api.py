@@ -34,14 +34,16 @@ PACE = 0.6  # segundos entre chamadas (aumenta sozinho se houver 429)
 # ----------------------------------------------------------------------------
 # Mascaramento (LGPD)
 # ----------------------------------------------------------------------------
-PHONE_KEY = re.compile(r"(telefone|celular|fone|whats|^tel)", re.I)
+PHONE_KEY = re.compile(r"(telefone|celular|fone|whats|^tel|^contato$)", re.I)
 HIDE_KEY = re.compile(
     r"(cpf|cnpj|e_?mail|^rg$|documento|nascimento|endereco|logradouro|cep|"
-    r"bairro|complemento|observ|^obs|descri|historico|anotac|mensagem)", re.I)
-NAME_KEY = re.compile(r"(nome|paciente|pessoa|cliente|responsavel|devedor|sacado)", re.I)
+    r"bairro|complemento|observ|^obs|descri|historico|anotac|mensagem|"
+    r"url|foto|thumb|guid|prontuario)", re.I)
+NAME_KEY = re.compile(r"(nome|apelido|paciente|pessoa|cliente|consumidor|responsavel|"
+                      r"devedor|sacado|dentista|profissional|medico)", re.I)
 SAFE_KEY = re.compile(
     r"(especie|forma_?pagamento|situacao|status|tipo|plano|procedimento|"
-    r"convenio|categoria|banco)", re.I)
+    r"convenio|categoria|banco|cargo)", re.I)
 TOKEN_KEY = re.compile(r"token", re.I)
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
 CPF_RE = re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b")
@@ -72,7 +74,7 @@ def mask(obj, key=""):
         return {k: mask(v, k) for k, v in obj.items()}
     if isinstance(obj, list):
         return [mask(x, key) for x in obj]
-    if obj is None or obj == "":
+    if obj is None or obj == "" or isinstance(obj, bool):
         return obj
     if key and HIDE_KEY.search(key):
         return "[oculto]"
@@ -173,8 +175,10 @@ def find_records(obj):
             return []
         if any("id" in x for x in dicts):
             return dicts
+        if any(re.search(r"id$", k, re.I) for x in dicts for k in x):
+            return dicts
         out = []
-        for x in dicts:  # agenda agrupada por dia: achata as listas internas
+        for x in dicts:  # grupos sem identificador próprio: achata as listas internas
             for v in x.values():
                 if isinstance(v, list) and v and isinstance(v[0], dict):
                     out += v
@@ -377,6 +381,11 @@ def run(api, est):
         res = api.get(path)
         recs = find_records(res["json"]) if res["status"] == 200 else ([] if res["status"] == 204 else None)
         rep.add(num, name, tpl, res, recs, sample_of(recs, res["json"] if res["status"] == 200 else None), **kw)
+        if recs and len(recs) > 1:
+            cnt = collections.Counter(k for r in recs for k in r)
+            partial = ["%s (%d de %d)" % (k, n, len(recs)) for k, n in cnt.items() if n < len(recs)]
+            if partial:
+                rep.samples[-1] = rep.samples[-1] + ("Campos que NÃO vêm em todos os registros: " + ", ".join(partial),)
         return res, (recs or [])
 
     # 2. Contas a receber em aberto
@@ -403,9 +412,13 @@ def run(api, est):
                    "/v5/Estabelecimentos/%s/Agenda/0/%s/%s" % (E, iso(today), iso(a_fim)))
     _, ag6 = fetch("6", "Agenda v6 (com situação)", "/v6/Agendamento/Estabelecimento/{ID}/{hoje}/{hoje+2}",
                    "/v6/Agendamento/Estabelecimento/%s/%s/%s" % (E, iso(today), iso(a_fim)))
-    _, ag6b = fetch("6b", "Agenda v6 - 30 dias atrás (só p/ achar valores de situação)",
-                    "/v6/Agendamento/Estabelecimento/{ID}/{hoje-30}/{hoje}",
-                    "/v6/Agendamento/Estabelecimento/%s/%s/%s" % (E, iso(today - timedelta(days=30)), iso(today)))
+    # a API aceita no máximo 10 dias por consulta: busco janelas curtas só para descobrir os valores de situação
+    ag6b = []
+    for i, (ini, fim) in enumerate(((-27, -19), (-18, -10), (-9, -1), (3, 11)), start=1):
+        _, part = fetch("6b%d" % i, "Agenda v6 - janela extra %d (só p/ achar valores de situação)" % i,
+                        "/v6/Agendamento/Estabelecimento/{ID}/{hoje%+d}/{hoje%+d}" % (ini, fim),
+                        "/v6/Agendamento/Estabelecimento/%s/%s/%s" % (E, iso(today + timedelta(days=ini)), iso(today + timedelta(days=fim))))
+        ag6b += part
 
     # 7. Orçamentos
     print("7. Orçamentos")
@@ -437,7 +450,7 @@ def analyse(rep, today, p_ini, p_fim, open_now, open_60, received, ag5, ag6, ag6
     if received:
         r0 = received[0]
         esp = pick_key(r0, ("especieNome", "nomeEspecie"), r"especie.*nome|nome.*especie") or pick_key(r0, (), r"especie|forma")
-        val = pick_key(r0, ("valorRecebido", "valorPago", "valorBaixa", "valorLiquido", "valor"), r"valor")
+        val = pick_key(r0, ("pagoValor", "valorRecebido", "valorPago", "valorBaixa", "valorLiquido", "valor"), r"valor|pago")
         tot = collections.OrderedDict()
         if esp and val:
             for r in received:
@@ -445,7 +458,11 @@ def analyse(rep, today, p_ini, p_fim, open_now, open_60, received, ag5, ag6, ag6
                 k = str(r.get(esp))
                 s, q = tot.get(k, (0.0, 0))
                 tot[k] = (s + (n or 0.0), q + 1)
-        ex["recebidos"] = {"campo_forma": esp, "campo_valor": val, "totais": tot}
+        extras = {}
+        for k in r0:
+            if re.match(r"pago(multa|juros|descontos)$", k, re.I):
+                extras[k] = sum(parse_num(r.get(k)) or 0.0 for r in received)
+        ex["recebidos"] = {"campo_forma": esp, "campo_valor": val, "totais": tot, "extras": extras}
 
     # --- Em aberto vencido
     ex["vencido"] = None
@@ -494,26 +511,23 @@ def analyse(rep, today, p_ini, p_fim, open_now, open_60, received, ag5, ag6, ag6
     # --- (c) orçamentos
     ex["orc"] = None
     if orc:
-        r0 = orc[0]
-        dk = pick_key(r0, ("dataAprovacao",), r"aprovacao")
-        sk = pick_key(r0, (), r"situacao|status|aprovado")
-        vazio = sentinela = preenchido = 0
-        cross = collections.Counter()
+        allk = collections.Counter(k for r in orc for k in r)
+        dk = next((k for k in allk if re.search(r"aprovacao", k, re.I)), None)
+        sk = next((k for k in allk if re.search(r"situacao|status|aprovado", k, re.I)), None)
+        ausente = vazio = sentinela = preenchido = 0
         for r in orc:
-            v = r.get(dk) if dk else None
+            if not dk or dk not in r:
+                ausente += 1
+                continue
+            v = r.get(dk)
             if v in (None, ""):
                 vazio += 1
-                filled = "vazia"
             elif (parse_date(v) or date(2000, 1, 1)).year <= 1901:
                 sentinela += 1
-                filled = "data-padrão (0001-01-01)"
             else:
                 preenchido += 1
-                filled = "preenchida"
-            if sk:
-                cross[(str(r.get(sk)), filled)] += 1
-        ex["orc"] = {"campo_data": dk, "campo_situacao": sk, "vazio": vazio, "sentinela": sentinela,
-                     "preenchido": preenchido, "cross": cross}
+        ex["orc"] = {"campo_data": dk, "campo_situacao": sk, "total": len(orc), "ausente": ausente,
+                     "vazio": vazio, "sentinela": sentinela, "preenchido": preenchido}
 
     # --- pacientes
     ex["pac"] = {"8a": phone_summary(pac1), "8b": phone_summary(pac2), "n8a": len(pac1), "n8b": len(pac2)}
@@ -546,18 +560,21 @@ def build_markdown(rep, est_count, today, refresh_ok, login_res, refresh_res):
     w("## 2. Exemplo de um registro de cada endpoint (mascarado)")
     w("")
     w("Mostra os nomes dos campos e o formato dos valores (ex.: número `80.0` x texto `\"80,00\"`).")
-    for num, name, tpl, sample in rep.samples:
+    for item in rep.samples:
+        num, name, tpl, sample = item[:4]
         w("")
         w("### %s — %s" % (num, name))
         w("```json")
         w(json.dumps(sample, ensure_ascii=False, indent=2))
         w("```")
+        if len(item) > 4:
+            w(item[4])
     w("")
     w("## 3. Valores possíveis do campo de situação da agenda")
     w("")
     keys, sit = ex["situacao"]
     if sit:
-        w("Campos encontrados: %s. Valores vistos (agenda de hoje a +2 dias e mais 30 dias para trás):" % ", ".join("`%s`" % k for k in sorted(keys)))
+        w("Campos encontrados: %s. Valores vistos (hoje a +2 dias, 27 dias para trás e 3 a 11 dias à frente):" % ", ".join("`%s`" % k for k in sorted(keys)))
         w("")
         w("| Campo | Valor | Ocorrências |")
         w("|-------|-------|-------------|")
@@ -581,6 +598,10 @@ def build_markdown(rep, est_count, today, refresh_ok, login_res, refresh_res):
             w("| %s | %d | %s |" % (k, q, money(s)))
             total += s
         w("| **Total geral** | | **%s** |" % money(total))
+        if r.get("extras"):
+            w("")
+            w("Outros valores nos mesmos recebimentos (não incluídos acima): " + "; ".join(
+                "`%s` = %s" % (k, money(x)) for k, x in r["extras"].items()))
     else:
         w("Recebidos: não foi possível totalizar (sem dados ou campos de forma de pagamento/valor não identificados — confira os exemplos acima).")
     w("")
@@ -629,12 +650,15 @@ def build_markdown(rep, est_count, today, refresh_ok, login_res, refresh_res):
     w("**(c) Dá para identificar orçamentos não aprovados?**")
     w("")
     if o:
-        w("- Campo de data: `%s`; campo de situação/aprovação: `%s`." % (o["campo_data"], o["campo_situacao"]))
-        w("- `dataAprovacao` vazia/nula: %d; com data-padrão (ex.: 0001-01-01): %d; preenchida: %d." % (o["vazio"], o["sentinela"], o["preenchido"]))
-        if o["cross"]:
-            w("- Cruzamento situação x data: " + "; ".join("%s / %s = %d" % (a, b, n) for (a, b), n in o["cross"].most_common()))
-        w("- **Conclusão: %s**." % ("SIM — não aprovados vêm com data vazia/padrão" if (o["vazio"] or o["sentinela"]) and o["campo_data"] else
-                                    "não ficou claro (todos têm data de aprovação ou o campo não existe)"))
+        w("- Total de orçamentos: %d. Campo de data de aprovação: `%s`; campo de situação/status: `%s`." % (
+            o["total"], o["campo_data"], o["campo_situacao"]))
+        w("- `dataAprovacao` **ausente** (o campo nem vem no registro): %d; presente mas vazia/nula: %d; "
+          "com data-padrão (ex.: 0001-01-01): %d; com data real: %d." % (o["ausente"], o["vazio"], o["sentinela"], o["preenchido"]))
+        nao = o["ausente"] + o["vazio"] + o["sentinela"]
+        w("- **Conclusão: %s**" % (
+            "SIM — não aprovados = sem `dataAprovacao` (%d de %d). No n8n, teste se o campo existe/está vazio, não apenas se é nulo." % (nao, o["total"])
+            if o["campo_data"] and nao and o["preenchido"] else
+            "não ficou claro (todos aprovados, nenhum aprovado ou campo inexistente)."))
     else:
         w("Sem orçamentos no período; inconclusivo.")
     w("")
@@ -735,6 +759,12 @@ def selftest():
     assert fmt_pattern("(12) 99876-5434") == "str:(99) 99999-9999"
     assert find_records({"data": [{"dia": "1", "itens": [{"id": 1}, {"id": 2}]}]}) == [{"id": 1}, {"id": 2}]
     assert find_records({"data": {"lista": [{"id": 1}], "total": 1}}) == [{"id": 1}]
+    assert len(find_records({"data": [{"funcionarioID": 1, "horarios": [{"a": 1}, {"a": 2}]}]})) == 1
+    mm = mask({"apelido": "Willian", "contato": 65992184185, "thumbURL": "http://x/y", "guid": "abc",
+               "numeroProntuario": "000448", "consumidorApelido": "Karen Monique", "cargoNome": "Dentista"})
+    assert mask({"consumidorPessoaFone1Sms": False})["consumidorPessoaFone1Sms"] is False
+    assert mm == {"apelido": "W.", "contato": "(65) 9****-**85", "thumbURL": "[oculto]", "guid": "[oculto]",
+                  "numeroProntuario": "[oculto]", "consumidorApelido": "K.M.", "cargoNome": "Dentista"}, mm
     print("Autoteste OK: mascaramento e leitura de formatos funcionando.")
     return 0
 
