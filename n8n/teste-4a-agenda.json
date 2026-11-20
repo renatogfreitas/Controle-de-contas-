@@ -1,0 +1,219 @@
+{
+  "name": "TESTE 4a - Agenda de amanhã",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "3dd6958b-1dbd-47ea-9b39-9ae41a87c02b",
+      "name": "Iniciar teste",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "09ff919d-53b0-4c45-84ea-f655271a0d77",
+              "name": "co_usuario",
+              "value": "PREENCHER_NO_N8N",
+              "type": "string"
+            },
+            {
+              "id": "a39dd1ab-334b-4f93-9a95-a23325a57697",
+              "name": "co_senha",
+              "value": "PREENCHER_NO_N8N",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8e5d5b11-3a42-4c78-ab60-3e7573d35f6d",
+      "name": "Configuração",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.aplicativo.net/v4/Auth/co",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formData",
+              "name": "Nome",
+              "value": "={{ $json.co_usuario }}"
+            },
+            {
+              "parameterType": "formData",
+              "name": "Senha",
+              "value": "={{ $json.co_senha }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "424fe923-ecd3-4e2c-94ad-c912505b0a20",
+      "name": "Login Controle Odonto",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "28f8e5ff-3c6d-4f34-9e92-62ae03a7db37",
+              "name": "token",
+              "value": "={{ $json.data.accessToken }}",
+              "type": "string"
+            },
+            {
+              "id": "8080026f-fc3a-4f3f-b0d9-78f316bac35b",
+              "name": "estabelecimentoID",
+              "value": "={{ $json.data.outrosLocais[0].estabelecimentoID }}",
+              "type": "string"
+            },
+            {
+              "id": "24746874-fdac-4ac2-8fb1-96fbc84f9b0e",
+              "name": "amanha",
+              "value": "={{ $now.setZone('America/Sao_Paulo').plus({ days: 1 }).toFormat('yyyy-MM-dd') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e57f205e-eaf1-4b80-9ac7-a01ddedcac30",
+      "name": "Dados do login",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.aplicativo.net/v6/Agendamento/Estabelecimento/{{ $json.estabelecimentoID }}/{{ $json.amanha }}/{{ $json.amanha }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.token }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "f9d86f64-192f-48c0-9641-00077bd1b079",
+      "name": "Agenda de amanhã",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        0
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== Nó \"Resumo\" =====\n// Lê a resposta da agenda e devolve UM item com números e 3 exemplos MASCARADOS (LGPD).\n\nconst entrada = $input.all();\nconst amanha = $('Dados do login').first().json.amanha;\n\n// 1) Juntar a lista de agendamentos (trata 204 = sem consultas)\nlet agendamentos = [];\nlet statusHttp = null;\nfor (const item of entrada) {\n  const j = item.json || {};\n  statusHttp = j.statusCode ?? statusHttp;\n  let corpo = j.body ?? j.data ?? j;\n  if (typeof corpo === 'string') {\n    corpo = corpo.trim() === '' ? {} : JSON.parse(corpo);\n  }\n  if (Array.isArray(corpo)) agendamentos.push(...corpo);\n  else if (corpo && Array.isArray(corpo.data)) agendamentos.push(...corpo.data);\n}\n\n// 2) Funções auxiliares\nconst semAcento = (t) => String(t ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();\nconst primeiro = (obj, campos) => { for (const c of campos) if (obj[c] !== undefined && obj[c] !== null && obj[c] !== '') return obj[c]; return null; };\n\nconst CAMPOS_NOME = ['consumidorPessoaNome', 'consumidorNome', 'pacienteNome', 'nomePaciente', 'nome'];\nconst CAMPOS_HORA = ['dataHoraInicio', 'horaInicio', 'dataInicio', 'inicio', 'horario', 'hora', 'dataHora', 'data'];\n\nfunction hora(ag) {\n  const v = primeiro(ag, CAMPOS_HORA);\n  if (!v) return null;\n  const m = String(v).match(/(\\d{2}):(\\d{2})/);\n  return m ? `${m[1]}:${m[2]}` : null;\n}\nfunction iniciais(nome) {\n  if (!nome) return '?';\n  return String(nome).trim().split(/\\s+/).filter(p => p.length > 2 || /^[A-ZÀ-Ý]/.test(p))\n    .map(p => p[0].toUpperCase() + '.').join('');\n}\nfunction digitos(fone) { return String(fone ?? '').replace(/\\D/g, ''); }\nfunction ehCelular(fone) { const d = digitos(fone); return d.length === 11 && d[2] === '9'; }\nfunction foneMascarado(fone) {\n  const d = digitos(fone);\n  if (d.length < 10) return 'sem telefone';\n  return `(${d.slice(0, 2)}) ****-**${d.slice(-2)}`;\n}\nconst ehAvaliacao = (ag) => semAcento(ag.tipoAtendimento).includes('avaliacao');\n\n// 3) Contas\nconst porSituacao = {};\nfor (const ag of agendamentos) {\n  const s = ag.situacao || '(sem situação)';\n  porSituacao[s] = (porSituacao[s] || 0) + 1;\n}\nconst semAvaliacao = agendamentos.filter(ag => !ehAvaliacao(ag));\nconst horarios = agendamentos.map(hora).filter(Boolean).sort();\nconst comCelular = agendamentos.filter(ag => ehCelular(ag.consumidorPessoaFone1)).length;\n\nconst ordenados = [...agendamentos].sort((a, b) => (hora(a) || '99').localeCompare(hora(b) || '99'));\nconst exemplos = ordenados.slice(0, 3).map(ag => ({\n  paciente_iniciais: iniciais(primeiro(ag, CAMPOS_NOME)),\n  horario: hora(ag) || '?',\n  tipo: ag.tipoAtendimento || '?',\n  telefone: foneMascarado(ag.consumidorPessoaFone1),\n}));\n\nreturn [{\n  json: {\n    data_consultada: amanha,\n    status_http_agenda: statusHttp,\n    total_agendamentos: agendamentos.length,\n    total_por_situacao: porSituacao,\n    total_sem_avaliacoes: semAvaliacao.length,\n    total_avaliacoes: agendamentos.length - semAvaliacao.length,\n    primeira_consulta: horarios[0] || null,\n    com_celular_valido: comCelular,\n    sem_celular_valido: agendamentos.length - comCelular,\n    exemplos_mascarados: exemplos,\n    // Só os NOMES dos campos (sem valores) para ajustarmos o fluxo, se preciso:\n    campos_disponiveis: agendamentos[0] ? Object.keys(agendamentos[0]) : [],\n  }\n}];\n"
+      },
+      "id": "80aef1db-72ee-4042-8123-98e76bf64008",
+      "name": "Resumo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Iniciar teste": {
+      "main": [
+        [
+          {
+            "node": "Configuração",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuração": {
+      "main": [
+        [
+          {
+            "node": "Login Controle Odonto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Login Controle Odonto": {
+      "main": [
+        [
+          {
+            "node": "Dados do login",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dados do login": {
+      "main": [
+        [
+          {
+            "node": "Agenda de amanhã",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agenda de amanhã": {
+      "main": [
+        [
+          {
+            "node": "Resumo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo"
+  },
+  "pinData": {},
+  "active": false
+}
